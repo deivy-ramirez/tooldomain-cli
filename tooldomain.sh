@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# Entrada
+# =========================
+input="${1:-}"
+if [[ -z "$input" ]]; then
+  echo "Uso: tooldomain dominio.com | https://dominio.com/ruta | user@dominio.com"
+  exit 1
+fi
+
+# =========================
+# Normalización de dominio
+# =========================
+dominio="$input"
+dominio="${dominio%/}"
+dominio="${dominio#https://}"
+dominio="${dominio#http://}"
+dominio="${dominio#/}"
+dominio="$(echo "$dominio" | sed -e 's|^[^/]*//||' -e 's|/.*$||')"
+dominio="${dominio#www.}"
+dominio="${dominio#mail.}"
+if [[ "$dominio" =~ .*@.* ]]; then
+  dominio="$(echo "$dominio" | sed -n 's/.*@//p')"
+fi
+dominio="$(echo "$dominio" | tr -d '[:space:]')"
+
+# =========================
+# Helpers generales
+# =========================
+has_cmd(){ command -v "$1" >/dev/null 2>&1; }
+is_tty(){ [[ -t 1 ]]; }
+is_ipv4() { grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+
+# =========================
+# Colores (solo si TTY)
+# =========================
+if is_tty; then
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'
+  C_GRN=$'\033[32m'
+  C_YLW=$'\033[33m'
+  C_BLU=$'\033[34m'
+  C_RST=$'\033[0m'
+else
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GRN=""; C_YLW=""; C_BLU=""; C_RST=""
+fi
+
+ok(){  echo "${C_GRN}OK${C_RST}"; }
+warn(){ echo "${C_YLW}WARN${C_RST}"; }
+
+# =========================
+# DNS/DoH settings
+# =========================
+RESOLVERS=("local" "8.8.8.8" "1.1.1.1" "9.9.9.9")
+DIG_TIME=4
+DIG_TRIES=2
+CURL_TIME=4
+
+DOH_GOOGLE="https://dns.google/resolve"
+DOH_CLOUDFLARE="https://cloudflare-dns.com/dns-query"
+
+# =========================
+# DNS helpers
+# =========================
+dig_short() { # name type resolver
+  local name="$1" type="$2" r="$3"
+  if ! has_cmd dig; then return 1; fi
+  if [[ "$r" == "local" ]]; then
+    dig +time="$DIG_TIME" +tries="$DIG_TRIES" +short "$name" "$type" 2>/dev/null || true
+  else
+    dig +time="$DIG_TIME" +tries="$DIG_TRIES" +short @"$r" "$name" "$type" 2>/dev/null || true
+  fi
+}
+
+doh_json() { # provider name type -> json
+  local provider="$1" name="$2" type="$3"
+  has_cmd curl || return 1
+  has_cmd jq   || return 1
+
+  if [[ "$provider" == "google" ]]; then
+    curl -sS --max-time "$CURL_TIME" "${DOH_GOOGLE}?name=${name}&type=${type}" || true
+  else
+    curl -sS --max-time "$CURL_TIME" -H 'accept: application/dns-json' \
+      "${DOH_CLOUDFLARE}?name=${name}&type=${type}" || true
+  fi
+}
+
+doh_extract() { # json want_type -> lines
+  local json="$1" want="$2" t=""
+  [[ -z "$json" ]] && return 0
+  case "$want" in
+    A) t=1 ;;
+    MX) t=15 ;;
+    NS) t=2 ;;
+    TXT) t=16 ;;
+    CNAME) t=5 ;;
+    *) return 0 ;;
+  esac
+  echo "$json" | jq -r --argjson T "$t" '.Answer[]? | select(.type==$T) | .data' 2>/dev/null || true
+}
+
+# global method
+SOURCE_METHOD="-"
+
+resolve_any() { # name type -> lines
+  local name="$1" type="$2" r out
+  SOURCE_METHOD="-"
+
+  # 1) dig
+  if has_cmd dig; then
+    for r in "${RESOLVERS[@]}"; do
+      out="$(dig_short "$name" "$type" "$r" | awk 'NF' || true)"
+      if [[ -n "$out" ]]; then
+        SOURCE_METHOD="$r"
+        echo "$out"
+        return 0
+      fi
+    done
+  fi
+
+  # 2) DoH (si curl+jq)
+  if has_cmd curl && has_cmd jq; then
+    out="$(doh_extract "$(doh_json google "$name" "$type")" "$type" | awk 'NF' || true)"
+    if [[ -n "$out" ]]; then SOURCE_METHOD="doh:google"; echo "$out"; return 0; fi
+
+    out="$(doh_extract "$(doh_json cloudflare "$name" "$type")" "$type" | awk 'NF' || true)"
+    if [[ -n "$out" ]]; then SOURCE_METHOD="doh:cloudflare"; echo "$out"; return 0; fi
+  fi
+
+  # 3) nslookup
+  if has_cmd nslookup; then
+    case "$type" in
+      A)     out="$(nslookup "$name" 8.8.8.8 2>/dev/null | awk '/Address: / && !/127\.0\.0\.1/ {print $2}' || true)" ;;
+      NS)    out="$(nslookup -type=NS "$name" 8.8.8.8 2>/dev/null | awk '/nameserver/ {print $NF}' || true)" ;;
+      MX)    out="$(nslookup -type=MX "$name" 8.8.8.8 2>/dev/null | awk '/mail exchanger/ {print $1 " " $NF}' | sed 's/0/0/' || true)" ;;
+      TXT)   out="$(nslookup -type=TXT "$name" 8.8.8.8 2>/dev/null | sed 's/.*text = //' | tr -d '"' || true)" ;;
+      CNAME) out="$(nslookup -type=CNAME "$name" 8.8.8.8 2>/dev/null | awk '/canonical name/ {print $NF}' || true)" ;;
+      *) out="" ;;
+    esac
+    out="$(echo "$out" | awk 'NF' || true)"
+    if [[ -n "$out" ]]; then SOURCE_METHOD="nslookup:8.8.8.8"; echo "$out"; return 0; fi
+  fi
+
+  return 1
+}
+
+resolve_A_follow() { # host -> IPs
+  local host="$1" ips cname hops=0 method="-"
+  while (( hops < 10 )); do
+    ips="$(resolve_any "$host" A 2>/dev/null | grep -Eo '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u || true)"
+    if [[ -n "$ips" ]]; then
+      method="$SOURCE_METHOD"
+      SOURCE_METHOD="$method"
+      echo "$ips"
+      return 0
+    fi
+    cname="$(resolve_any "$host" CNAME 2>/dev/null | head -n1 | sed 's/\.$//' || true)"
+    [[ -z "$cname" ]] && return 1
+    method="$SOURCE_METHOD"
+    host="$cname"
+    ((hops++))
+  done
+  return 1
+}
+
+resolve_PTR() { # ip
+  local ip="$1"
+  [[ -z "$ip" ]] && echo "-" && return 0
+  if ! echo "$ip" | is_ipv4; then echo "-"; return 0; fi
+  if has_cmd dig; then
+    dig +time=3 +tries=1 +short -x "$ip" 2>/dev/null | sed 's/\.$//' | head -n1 || true
+  else
+    echo "-"
+  fi
+}
+
+# Ping macOS compatible
+ping_ip() { # host
+  local host="$1" line=""
+  line="$(ping -q -c 1 -W 1000 "$host" 2>/dev/null | head -n1 || true)"
+  [[ -z "$line" ]] && line="$(ping -q -c 1 "$host" 2>/dev/null | head -n1 || true)"
+  [[ -z "$line" ]] && { echo "-"; return 0; }
+  echo "$line" | sed -e "s/).*//" -e "s/.*(//" || true
+}
+
+# =========================
+# Provider + checks
+# =========================
+provider_by_mx() {
+  local mx="$1"
+  local lmx; lmx="$(echo "$mx" | tr '[:upper:]' '[:lower:]')"
+
+  # Google relay (no es Workspace completo)
+  if echo "$lmx" | grep -qE '(^|[[:space:]])smtp\.google\.com($|[[:space:]])'; then
+    echo "Google SMTP Relay"
+    return
+  fi
+
+  if echo "$lmx" | grep -qE 'mail\.protection\.outlook\.com|outlook\.com'; then echo "Microsoft 365"; return; fi
+  if echo "$lmx" | grep -qE 'aspmx\.l\.google\.com|googlemail\.com'; then echo "Google Workspace"; return; fi
+  if echo "$lmx" | grep -qE "mail\.${dominio//./\\.}"; then echo "Hosting/cPanel"; return; fi
+  echo "No identificado"
+}
+
+provider_by_spf() {
+  local spf="$1"
+  local l; l="$(echo "$spf" | tr '[:upper:]' '[:lower:]')"
+  if echo "$l" | grep -q 'spf\.protection\.outlook\.com'; then echo "Microsoft 365"; return; fi
+  if echo "$l" | grep -qE '_spf\.google\.com|spf\.google\.com'; then echo "Google Workspace"; return; fi
+  if echo "$l" | grep -qE 'spf\.cpanel\.net|include:.*cpanel|spf\.host\.'; then echo "Hosting/cPanel"; return; fi
+  echo "No identificado"
+}
+
+check_spf_status() {
+  local spf="$1"
+  [[ -z "$spf" ]] && { echo "$(warn)"; return; }
+  echo "$spf" | grep -qiE ' -all(\s|$)' && echo "$(ok)" || echo "$(warn)"
+}
+
+check_dmarc_status() {
+  local d="$1"
+  [[ -z "$d" ]] && { echo "$(warn)"; return; }
+  local p
+  p="$(echo "$d" | tr '[:upper:]' '[:lower:]' | sed -n 's/.*p=\([^; ]*\).*/\1/p' | head -n1 || true)"
+  [[ -z "$p" ]] && { echo "$(warn)"; return; }
+  [[ "$p" == "reject" || "$p" == "quarantine" ]] && echo "$(ok)" || echo "$(warn)"
+}
+
+check_dkim_status() {
+  local k="$1"
+  [[ -z "$k" ]] && { echo "$(warn)"; return; }
+  echo "$k" | grep -qi 'p=' && echo "$(ok)" || echo "$(warn)"
+}
+
+# =========================
+# Panel detect (tu empresa: Plesk = pl* / ohana / tadeo)
+# =========================
+# Heurística:
+# - Si aparece "ohana" o "tadeo" o hostname que empieza por "pl"
+# - Si aparecen pistas típicas de cPanel => cPanel
+detect_panel() { # ns_list ptr_list
+  local ns="$1"
+  local ptrs="$2"
+  local blob
+
+  blob="$(printf "%s\n%s" "$ns" "$ptrs" | tr '[:upper:]' '[:lower:]')"
+
+  # =========================
+  # Plesk (interno)
+  # =========================
+  if echo "$blob" | grep -qE 'ohana\.colombiahosting\.com\.co|tadeo\.colombiahosting\.com\.co'; then
+    echo "Plesk"
+    return
+  fi
+
+  # plXXXX*
+  if echo "$blob" | grep -qE '(^|[^a-z0-9])pl[0-9]+'; then
+    echo "Plesk"
+    return
+  fi
+
+  # =========================
+  # cPanel (reglas internas)
+  # =========================
+
+  # servidores que empiezan por "s"
+  if echo "$blob" | grep -qE '(^|[^a-z0-9])s[0-9]+'; then
+    echo "cPanel"
+    return
+  fi
+
+  # cualquier colombiahosting.com.co excepto ohana/tadeo
+  if echo "$blob" | grep -q 'colombiahosting\.com\.co'; then
+    echo "cPanel"
+    return
+  fi
+
+  # =========================
+  # Fallbacks genéricos
+  # =========================
+  if echo "$blob" | grep -qE 'cpanel|webdisk|whm|mysecurecloudhost|bluehost|hostgator|namecheap|siteground|a2hosting|dreamhost'; then
+    echo "cPanel"
+    return
+  fi
+
+  if echo "$blob" | grep -q 'plesk'; then
+    echo "Plesk"
+    return
+  fi
+
+  echo "No identificado"
+}
+
+
+# =========================
+# Padding que ignora ANSI
+# =========================
+strip_ansi() { sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g'; }
+
+pad_right() { # text width
+  local txt="$1" w="$2"
+  local plain len
+  plain="$(printf "%s" "$txt" | strip_ansi)"
+  len=${#plain}
+  if (( len >= w )); then
+    printf "%-*s" "$w" "${plain:0:w}"
+  else
+    printf "%s%*s" "$txt" $((w-len)) ""
+  fi
+}
+
+# Anchos (como tu diseño original)
+W_REG=35
+W_IP=25
+W_PTR=35
+W_PING=15
+W_NOTES=7
+
+print_header_A() {
+  echo "---------------------------------------------------------------------------------------------------------------------------------"
+  printf "%s | %s | %s | %s | %s |\n" \
+    "$(pad_right "| Registro A" "$W_REG")" \
+    "$(pad_right "IP (fuente)" "$W_IP")" \
+    "$(pad_right "Servidor (PTR)" "$W_PTR")" \
+    "$(pad_right "Ping" "$W_PING")" \
+    "$(pad_right "Notas" "$W_NOTES")"
+  echo "|-------------------------------------------------------------------------------------------------------------------------------|"
+}
+
+# Guardamos PTRs para detección panel
+PTR_COLLECT=""
+
+print_row_multiip() { # label host
+  local label="$1" host="$2"
+  local ips ip_first ptr pingv src notes
+
+  ips="$(resolve_A_follow "$host" 2>/dev/null || true)"
+  src="$SOURCE_METHOD"
+  pingv="$(ping_ip "$host")"; [[ -z "$pingv" ]] && pingv="-"
+  notes="-"
+
+  if [[ -z "$ips" ]]; then
+    local lab_col="${C_RED}${label}${C_RST}"
+    printf "%s | %s | %s | %s | %s |\n" \
+      "$(pad_right "| ${lab_col}" "$W_REG")" \
+      "$(pad_right "${C_RED}NO-RESUELVE${C_RST}" "$W_IP")" \
+      "$(pad_right "-" "$W_PTR")" \
+      "$(pad_right "$pingv" "$W_PING")" \
+      "$(pad_right "$notes" "$W_NOTES")"
+    return 0
+  fi
+
+  local lab_col="${C_GRN}${label}${C_RST}"
+  ip_first="$(echo "$ips" | head -n1)"
+  ptr="$(resolve_PTR "$ip_first")"; [[ -z "$ptr" ]] && ptr="-"
+
+  # acumular PTRs (para panel)
+  if [[ "$ptr" != "-" ]]; then
+    PTR_COLLECT="${PTR_COLLECT}"$'\n'"$ptr"
+  fi
+
+  printf "%s | %s | %s | %s | %s |\n" \
+    "$(pad_right "| ${lab_col}" "$W_REG")" \
+    "$(pad_right "${ip_first} (${src})" "$W_IP")" \
+    "$(pad_right "${ptr}" "$W_PTR")" \
+    "$(pad_right "$pingv" "$W_PING")" \
+    "$(pad_right "$notes" "$W_NOTES")"
+
+  echo "$ips" | tail -n +2 | while read -r ip; do
+    [[ -z "$ip" ]] && continue
+    ptr="$(resolve_PTR "$ip")"; [[ -z "$ptr" ]] && ptr="-"
+    printf "%s | %s | %s | %s | %s |\n" \
+      "$(pad_right "| " "$W_REG")" \
+      "$(pad_right "${ip} (${src})" "$W_IP")" \
+      "$(pad_right "${ptr}" "$W_PTR")" \
+      "$(pad_right "-" "$W_PING")" \
+      "$(pad_right "-" "$W_NOTES")"
+  done
+}
+
+# =========================
+# RUN
+# =========================
+echo "${C_BOLD}Dominio:${C_RST} $dominio"
+echo
+
+# A table
+print_header_A
+print_row_multiip "$dominio" "$dominio"
+print_row_multiip "www.$dominio" "www.$dominio"
+print_row_multiip "mail.$dominio" "mail.$dominio"
+print_row_multiip "webmail.$dominio" "webmail.$dominio"
+print_row_multiip "ftp.$dominio" "ftp.$dominio"
+echo "---------------------------------------------------------------------------------------------------------------------------------"
+echo
+
+# NS
+printf "| %-50s |\n" "Registros DNS (NS)"
+echo "|----------------------------------------------------|"
+ns_out="$(resolve_any "$dominio" NS 2>/dev/null | sed 's/\.$//' | awk 'NF' | sort -u || true)"
+ns_src="$SOURCE_METHOD"
+if [[ -n "$ns_out" ]]; then
+  echo "$ns_out" | awk '{printf "| %-50s |\n",$0}'
+else
+  echo "| No detectado                                         |"
+fi
+echo "------------------------------------------------------"
+echo "${C_DIM}Fuente NS:${C_RST} ${ns_src}"
+echo
+
+# MX
+printf "%-16s | %-60s |\n" "| Registro MX" "Servidor"
+echo "|--------------------------------------------------------------------------|"
+mx_raw="$(resolve_any "$dominio" MX 2>/dev/null | sed 's/\.$//' || true)"
+mx_src="$SOURCE_METHOD"
+if [[ -n "$mx_raw" ]]; then
+  echo "$mx_raw" | sort -n | awk '{printf "%-16s | %-60s |\n","| "$1,$2}'
+else
+  echo "| No detectado   | -                                                     |"
+fi
+echo "|--------------------------------------------------------------------------|"
+echo "${C_DIM}Fuente MX:${C_RST} ${mx_src}"
+echo
+
+# TXT: SPF/DMARC/DKIM
+txt_root="$(resolve_any "$dominio" TXT 2>/dev/null | tr -d '"' || true)"
+spf_line="$(echo "$txt_root" | grep -i 'v=spf1' | head -n1 || true)"
+dmarc_line="$(resolve_any "_dmarc.${dominio}" TXT 2>/dev/null | tr -d '"' | grep -i 'v=DMARC1' | head -n1 || true)"
+dkim_default="$(resolve_any "default._domainkey.${dominio}" TXT 2>/dev/null | tr -d '"' | head -n1 || true)"
+
+mx_provider="$(provider_by_mx "$mx_raw")"
+spf_provider="$(provider_by_spf "$spf_line")"
+
+spf_status="$(check_spf_status "$spf_line")"
+dmarc_status="$(check_dmarc_status "$dmarc_line")"
+dkim_status="$(check_dkim_status "$dkim_default")"
+
+# Panel detectado (usando NS + PTRs recolectados)
+panel="$(detect_panel "$ns_out" "$PTR_COLLECT")"
+
+echo "${C_BOLD}Proveedor detectado (por MX):${C_RST} ${C_BLU}${mx_provider}${C_RST}"
+echo "${C_BOLD}Proveedor sugerido (por SPF):${C_RST} ${C_BLU}${spf_provider}${C_RST}"
+echo "${C_BOLD}Panel detectado:${C_RST} ${C_BLU}${panel}${C_RST}"
+echo
+
+echo "${C_BOLD}Validaciones básicas:${C_RST}"
+echo " - SPF   : ${spf_status}  ${C_DIM}${spf_line:-"(no detectado)"}${C_RST}"
+echo " - DMARC : ${dmarc_status} ${C_DIM}${dmarc_line:-"(no detectado)"}${C_RST}"
+echo " - DKIM  : ${dkim_status}  ${C_DIM}${dkim_default:-"(no detectado)"}${C_RST}"
+echo
+
+# ALERTA MX vs SPF + sugerencias
+suggestions=()
+mixed=0
+if [[ "$mx_provider" != "No identificado" && "$spf_provider" != "No identificado" ]]; then
+  [[ "$(echo "$mx_provider" | tr '[:upper:]' '[:lower:]')" != "$(echo "$spf_provider" | tr '[:upper:]' '[:lower:]')" ]] && mixed=1
+fi
+
+if [[ "$mixed" -eq 1 ]]; then
+  echo "${C_RED}${C_BOLD}ALERTA:${C_RST} ${C_RED}Configuración mixta detectada (MX vs SPF)${C_RST}"
+  echo " - MX sugiere : ${C_BLU}${mx_provider}${C_RST}"
+  echo " - SPF sugiere: ${C_BLU}${spf_provider}${C_RST}"
+  suggestions+=("Posible configuración mixta: verifique que MX/SPF/DKIM/DMARC correspondan al mismo proveedor.")
+fi
+
+[[ -z "$dmarc_line" ]] && suggestions+=("No hay DMARC: cree _dmarc con p=none/quarantine/reject según su política.")
+[[ -z "$spf_line" ]] && suggestions+=("No hay SPF: agregue un TXT v=spf1 acorde al proveedor.")
+if ! has_cmd jq; then
+  suggestions+=("No se detecta jq: sin jq se limita el fallback DoH. Si puede instalar Homebrew: instale jq.")
+fi
+if ! has_cmd dig; then
+  suggestions+=("No se detecta dig: si puede instalar Homebrew, instale bind para obtener dig.")
+fi
+
+echo "${C_BOLD}Resumen:${C_RST} EMAIL: ${C_BLU}${mx_provider}${C_RST} | SPF ${spf_status} | DKIM ${dkim_status} | DMARC ${dmarc_status} | PANEL: ${C_BLU}${panel}${C_RST}"
+echo
+
+if [[ "${#suggestions[@]}" -gt 0 ]]; then
+  echo "${C_BOLD}Sugerencias:${C_RST}"
+  for s in "${suggestions[@]}"; do echo " - $s"; done
+  echo
+fi
