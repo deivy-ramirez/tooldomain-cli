@@ -54,24 +54,6 @@ tooldomain dominio.com
 También acepta:
 tooldomain https://dominio.com/ruta
 
-🧾 Ejemplo de salida:
-
-Dominio: ejemplo.com
-
----------------------------------------------------------------------------------------------------------------------------------
-| Registro A                          | IP (fuente)              | Servidor (PTR)                     | Ping           | Notas |
-|-------------------------------------------------------------------------------------------------------------------------------|
-| ejemplo.com                         | 190.8.146.21 (8.8.8.8)   | server.serverserver.com.co         | 190.8.146.21   | -     |
-| www.ejemplo.com                     | 190.8.146.21 (8.8.8.8)   | server.serverserver.com.co         | 190.8.146.21   | -     |
-| mail.ejemplo.com                    | NO-RESUELVE              | -                                  | -              | -     |
----------------------------------------------------------------------------------------------------------------------------------
-
-Proveedor detectado (por MX): Microsoft 365  
-Proveedor sugerido (por SPF): Hosting/cPanel  
-Panel detectado: cPanel  
-
-Resumen: EMAIL: Microsoft 365 | SPF OK | DKIM WARN | DMARC WARN | PANEL: cPanel
-
 📧 Detección de proveedor de correo
 
 El script identifica automáticamente:
