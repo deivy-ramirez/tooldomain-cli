@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/USUARIO/REPO/main"
+REPO_RAW="https://raw.githubusercontent.com/deivy-ramirez/tooldomain-cli/main"
 BIN_NAME="tooldomain"
 
 # Rutas típicas por usuario
