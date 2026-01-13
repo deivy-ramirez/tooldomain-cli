@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_RAW="https://raw.githubusercontent.com/deivy-ramirez/tooldomain-cli/main"
 BIN_NAME="tooldomain"
 
-TARGET_DIR="${HOME}/.local/bin"
+TARGET_DIR="${HOME}/bin"
 TARGET_PATH="${TARGET_DIR}/${BIN_NAME}"
 
 need_cmd() {
@@ -29,7 +29,7 @@ echo "🔐 Dando permisos..."
 chmod +x "$TARGET_PATH"
 
 # Asegurar PATH
-add_path_line='export PATH="$HOME/.local/bin:$PATH"'
+add_path_line='export PATH="$HOME/bin:$PATH"'
 updated_any=0
 
 for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
