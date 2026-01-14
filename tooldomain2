@@ -370,22 +370,26 @@ rdap_fetch() { # domain -> json
 rdap_parse_with_jq() { # json -> prints key info
   local json="$1"
 
-  local registrar created expires updated statuses nss
+  local registrar created expires updated statuses
+  local nss
+
   registrar="$(echo "$json" | jq -r '
     ( .entities[]? | select(.roles[]?=="registrar") | .vcardArray[1][]? | select(.[0]=="fn") | .[3] ) // empty
   ' | head -n1)"
+
   created="$(echo "$json" | jq -r '.events[]? | select(.eventAction=="registration") | .eventDate' | head -n1)"
   expires="$(echo "$json" | jq -r '.events[]? | select(.eventAction=="expiration") | .eventDate' | head -n1)"
   updated="$(echo "$json" | jq -r '.events[]? | select(.eventAction=="last changed") | .eventDate' | head -n1)"
   statuses="$(echo "$json" | jq -r '.status[]?' | paste -sd ", " -)"
-  nss="$(echo "$json" | jq -r '.nameservers[]?.ldhName' | sed 's/\.$//' | awk 'NF' | sort -u | paste -sd " " -)"
+
+  # Nameservers en vertical
+  nss="$(echo "$json" | jq -r '.nameservers[]?.ldhName' | sed 's/\.$//' | awk 'NF' | sort -u)"
 
   [[ -z "$registrar" ]] && registrar="-"
   [[ -z "$created" ]] && created="-"
   [[ -z "$expires" ]] && expires="-"
   [[ -z "$updated" ]] && updated="-"
   [[ -z "$statuses" ]] && statuses="-"
-  [[ -z "$nss" ]] && nss="-"
 
   echo "------------------------------------------------------"
   printf "| %-50s |\n" "DOMAIN INFO (RDAP/WHOIS)"
@@ -396,9 +400,13 @@ rdap_parse_with_jq() { # json -> prints key info
   printf "| %-18s | %-27s |\n" "Expira" "$expires"
   printf "| %-18s | %-27s |\n" "Actualizado" "$updated"
   printf "| %-18s | %-27s |\n" "Estado" "$statuses"
-  printf "| %-18s | %-27s |\n" "Nameservers" "$nss"
+  echo "| Nameservers:"
+  echo "$nss" | while read -r ns; do
+    [[ -n "$ns" ]] && printf "|   - %-44s |\n" "$ns"
+  done
   echo "------------------------------------------------------"
 }
+
 
 whois_fallback_parse() { # domain -> prints basic info (best effort)
   has_cmd whois || return 1
@@ -406,27 +414,31 @@ whois_fallback_parse() { # domain -> prints basic info (best effort)
   w="$(whois "$1" 2>/dev/null || true)"
   [[ -z "$w" ]] && return 1
 
-  # best-effort patterns (varía por TLD/registrar)
   local registrar created expires updated status ns
+
   registrar="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Registrar:|Sponsoring Registrar:|Registrar Name:/{print $2; exit}' | xargs || true)"
+/Registrar:|Sponsoring Registrar:|Registrar Name:/{print $2; exit}' | xargs || true)"
+
   created="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Creation Date:|Created On:|Created:|Fecha de creaci/{print $2; exit}' | xargs || true)"
+/Creation Date:|Created On:|Created:|Fecha de creaci/{print $2; exit}' | xargs || true)"
+
   expires="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Registry Expiry Date:|Expiration Date:|Expires On:|Expiry Date:|Expira:|Fecha de expir/{print $2; exit}' | xargs || true)"
+/Registry Expiry Date:|Expiration Date:|Expires On:|Expiry Date:|Expira:|Fecha de expir/{print $2; exit}' | xargs || true)"
+
   updated="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Updated Date:|Last Updated On:|Modified:|Fecha de modific/{print $2; exit}' | xargs || true)"
+/Updated Date:|Last Updated On:|Modified:|Fecha de modific/{print $2; exit}' | xargs || true)"
+
   status="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Domain Status:|Status:/{print $2}' | xargs | head -n1 || true)"
+/Domain Status:|Status:/{print $2}' | xargs | head -n1 || true)"
+
   ns="$(echo "$w" | awk -F: 'BEGIN{IGNORECASE=1}
-    /Name Server:|Nameserver:|nserver:/{print $2}' | xargs | sed 's/\.$//' | awk 'NF' | sort -u | paste -sd " " -)"
+/Name Server:|Nameserver:|nserver:/{print $2}' | sed 's/\.$//' | awk 'NF' | sort -u)"
 
   [[ -z "$registrar" ]] && registrar="-"
   [[ -z "$created" ]] && created="-"
   [[ -z "$expires" ]] && expires="-"
   [[ -z "$updated" ]] && updated="-"
   [[ -z "$status" ]] && status="-"
-  [[ -z "$ns" ]] && ns="-"
 
   echo "------------------------------------------------------"
   printf "| %-50s |\n" "DOMAIN INFO (WHOIS fallback)"
@@ -437,9 +449,13 @@ whois_fallback_parse() { # domain -> prints basic info (best effort)
   printf "| %-18s | %-27s |\n" "Expira" "$expires"
   printf "| %-18s | %-27s |\n" "Actualizado" "$updated"
   printf "| %-18s | %-27s |\n" "Estado" "$status"
-  printf "| %-18s | %-27s |\n" "Nameservers" "$ns"
+  echo "| Nameservers:"
+  echo "$ns" | while read -r nsline; do
+    [[ -n "$nsline" ]] && printf "|   - %-44s |\n" "$nsline"
+  done
   echo "------------------------------------------------------"
 }
+
 
 # =========================
 # RUN
