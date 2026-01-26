@@ -54,7 +54,7 @@ warn(){ echo "${C_YLW}WARN${C_RST}"; }
 # =========================
 # DNS/DoH settings
 # =========================
-RESOLVERS=("local" "8.8.8.8" "1.1.1.1" "9.9.9.9")
+RESOLVERS=("8.8.8.8" "1.1.1.1" "9.9.9.9" "local")
 DIG_TIME=4
 DIG_TRIES=2
 CURL_TIME=4
