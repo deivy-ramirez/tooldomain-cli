@@ -41,6 +41,7 @@ Si no están instalados, el script sigue funcionando (solo se desactiva el fallb
 📥 Instalación
 
 1. Descargar el script
+
    curl -fsSL https://raw.githubusercontent.com/deivy-ramirez/tooldomain-cli/main/install.sh | bash
 2. Dar permisos
    chmod +x tooldomain
